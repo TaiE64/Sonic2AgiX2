@@ -26,6 +26,7 @@ try:
     from .retarget_quality import (
         ROOT_ANGULAR_VELOCITY_LIMIT,
         ROOT_LINEAR_VELOCITY_LIMIT,
+        X2_ARM_COLLISION_MARGIN,
         foot_collision_geoms,
         joint_limit_report,
         root_motion_metrics,
@@ -35,6 +36,7 @@ except ImportError:  # direct script execution
     from retarget_quality import (
         ROOT_ANGULAR_VELOCITY_LIMIT,
         ROOT_LINEAR_VELOCITY_LIMIT,
+        X2_ARM_COLLISION_MARGIN,
         foot_collision_geoms,
         joint_limit_report,
         root_motion_metrics,
@@ -112,7 +114,9 @@ def qc_checks(qpos, fps):
            if len(velocity_frames) > 1 else 0.0)
     rep["max_joint_vel"] = float(vel)
     rep["max_root_vel"], rep["max_root_ang_vel"] = root_motion_metrics(qpos, fps)
-    rep["at_limit"], unexpected_limits = joint_limit_report(model, mujoco, dof)
+    rep["at_limit"], unexpected_limits = joint_limit_report(
+        model, mujoco, dof, fps=fps,
+    )
     rep["unexpected_at_limit"] = unexpected_limits
 
     foot_geoms = _worker["foot_geoms"]
@@ -202,7 +206,7 @@ def process_clip(args):
         ga_l, ga_r, gl = body_geoms(arm_l), body_geoms(arm_r), body_geoms(low)
         rt.ik_limits.append(_worker["CollisionAvoidanceLimit"](
             model, [(ga_l + ga_r, gl), (ga_l, ga_r)],  # arms-vs-lower + hand-vs-hand
-            minimum_distance_from_collisions=0.02))
+            minimum_distance_from_collisions=X2_ARM_COLLISION_MARGIN))
         for _ in range(20):
             rt.retarget(frames[0])
         # Trajectory-level rate limiter with warm-start feedback: IK branch
@@ -242,10 +246,16 @@ def process_clip(args):
 
 
 def main():
+    global OUT_ROOT
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--max_clips", type=int, default=None)
+    ap.add_argument("--out_root", type=pathlib.Path, default=OUT_ROOT,
+                    help="write to a separate directory; existing clips are skipped")
     args = ap.parse_args()
+
+    OUT_ROOT = args.out_root
 
     clips = []
     excluded = 0

@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 
 HERE = pathlib.Path(__file__).resolve().parent
-REPO = pathlib.Path("/home/taie/Desktop/Byte/Sonic_Retarget/GR00T-WholeBodyControl")
+REPO = HERE.parent.parent / "GR00T-WholeBodyControl"
 sys.path.insert(0, str(HERE))
 from lora import (LoRALinear, inject_lora, lora_parameters,  # noqa: E402
                   trainable_fraction)

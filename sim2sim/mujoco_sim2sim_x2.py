@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import sys
 import tempfile
@@ -53,14 +54,16 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))     # Any2Any/sim2sim
 _A2A = os.path.dirname(_HERE)                          # Any2Any
+_REPO = os.path.dirname(_A2A)
 sys.path.insert(0, _A2A)                               # kinematic_alignment.py
-sys.path.insert(0, os.path.join(_A2A, "any2any_train"))  # aligned_env.py (+x2 maps)
+from kinematic_alignment import (  # noqa: E402
+    G1_MUJOCO_TO_ISAACLAB_DOF, N_TARGET, OFFSET_VEC, PHI, T_SOURCE,
+)
 
-import aligned_env  # noqa: E402  (installs isaaclab stubs, imports x2/g1 maps)
-from x2 import X2_ISAACLAB_TO_MUJOCO_MAPPING  # noqa: E402
-
-X2_XML = "/home/taie/Desktop/Byte/Sonic_Retarget/GMR/assets/agibot_x2/x2_mocap.xml"
-_DATA = "/home/taie/Desktop/Byte/Sonic_Retarget/GR00T-WholeBodyControl/data"
+X2_XML = os.environ.get(
+    "X2_MJCF", os.path.join(_REPO, "GMR", "assets", "agibot_x2", "x2_mocap.xml")
+)
+_DATA = os.environ.get("X2_MOTION_DATA", os.path.join(_REPO, "data"))
 MOTION_DIRS = [
     f"{_DATA}/motion_lib_lafan_x2/robot",       # keep [0] = lafan (validate() matches here)
     f"{_DATA}/motion_lib_traindist_test/robot",
@@ -77,30 +80,44 @@ HIST = 10                # obs history length
 CTRL_DT = 0.02           # 50 Hz control
 PHYS_DT = 0.005          # 4 substeps
 
-IL2MJ = np.asarray(X2_ISAACLAB_TO_MUJOCO_MAPPING["isaaclab_to_mujoco_dof"])
-MJ2IL = np.asarray(X2_ISAACLAB_TO_MUJOCO_MAPPING["mujoco_to_isaaclab_dof"])
+# q_mj = q_il[IL2MJ]; q_il = q_mj[MJ2IL]. These fixed permutations were
+# measured from the X2 Isaac Lab articulation and are part of the policy ABI.
+IL2MJ = np.asarray([
+    0, 3, 6, 9, 14, 19, 1, 4, 7, 10, 15, 20, 2, 5, 8, 12,
+    17, 21, 23, 25, 27, 29, 13, 18, 22, 24, 26, 28, 30, 11, 16,
+])
+MJ2IL = np.asarray([
+    0, 6, 12, 1, 7, 13, 2, 8, 14, 3, 9, 29, 15, 22, 4, 10,
+    30, 16, 23, 5, 11, 17, 24, 18, 25, 19, 26, 20, 27, 21, 28,
+])
 
 # Arm joints (X2 MJ indices 15..28) for the optional stiffness multiplier that
 # emulates IsaacLab's rigid implicit tracking on the low-inertia arm chain.
 ARM_MJ = np.arange(15, 29)
-# Waist joints (yaw/pitch/roll). The waist is the weakest torso joint (kp 28.5 ->
-# ~18 Nm at full error) and references routinely pin waist_pitch at its +18deg limit
-# (100% of frames in the AMASS standing clip). IsaacLab's implicit actuator holds
-# that; MuJoCo's explicit servo loses to gravity once the CoM shifts and the torso
-# falls to the OPPOSITE limit (measured: q_des +18deg, actual -17deg -> permanent
-# backward lean). waist_kp_mult=4 restores tracking (err 30deg+ -> ~3deg median).
+# Waist joints (yaw/pitch/roll) for an optional diagnostic multiplier.  Normal
+# sim2sim runs must leave this at 1.0 now that the captured gains are the exact
+# AimDK RL gains (yaw 40.1792, pitch/roll 200); any multiplier is deliberately
+# outside the train/sim/deploy fidelity contract.
 WAIST_MJ = np.arange(12, 15)
 
 
 # --------------------------------------------------------------------------
-# alignment (single source of truth: the training-side FrameMapper)
+# alignment (NumPy-only copy of the training-side FrameMapper)
 # --------------------------------------------------------------------------
 class Align:
     def __init__(self):
-        fm = aligned_env.FrameMapper("cpu")
-        self.M = fm.m.cpu().numpy().astype(np.float64)      # (29,31) act: g1->x2
-        self.MT = fm.mt.cpu().numpy().astype(np.float64)    # (31,29) fwd: x2->g1
-        self.OFF = fm.off_x2.cpu().numpy().astype(np.float64)  # (31,) X2-IL zero offsets
+        mapping = np.zeros((T_SOURCE, N_TARGET), dtype=np.float32)
+        for g1_il in range(T_SOURCE):
+            g1_mj = int(G1_MUJOCO_TO_ISAACLAB_DOF[g1_il])
+            for x2_mj, weight in enumerate(PHI[g1_mj]):
+                if abs(weight) > 1e-9:
+                    mapping[g1_il, int(IL2MJ[x2_mj])] = weight
+        self.M = mapping.astype(np.float64)
+        self.MT = self.M.T.copy()
+        offset = np.zeros(N_TARGET, dtype=np.float32)
+        for x2_mj, value in enumerate(OFFSET_VEC):
+            offset[int(IL2MJ[x2_mj])] = value
+        self.OFF = offset.astype(np.float64)
 
     def pos(self, q_x2_il):   # absolute positions
         return (q_x2_il - self.OFF) @ self.MT
@@ -201,8 +218,9 @@ def find_clip(name):
 # observation builder
 # --------------------------------------------------------------------------
 BLOCKS = ("cmf", "maob", "pro")
-
-
+# Graph-derived order lives in its own light module so deploy tooling can
+# import it without mujoco/isaaclab.
+from onnx_block_order import BLOCK_DIMS, block_order_from_onnx  # noqa: E402,F401
 def detect_block_order(pol, capture_dir):
     """Recover the ONNX input block order for THIS export.
 
@@ -407,12 +425,33 @@ class Policy:
         return a.reshape(-1).astype(np.float64)
 
 
+def load_runtime_constants(capture_dir):
+    """Load captured Isaac Lab constants, with a portable JSON fallback."""
+    npz_path = os.path.join(capture_dir, "constants.npz")
+    if os.path.exists(npz_path):
+        with np.load(npz_path, allow_pickle=True) as raw:
+            constants = {key: raw[key] for key in raw.files}
+        rel_bias_path = os.path.join(capture_dir, "rel_bias.npy")
+        if os.path.exists(rel_bias_path):
+            constants["rel_bias"] = np.load(rel_bias_path)
+        return constants
+
+    json_path = os.path.join(_HERE, "runtime_constants.json")
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(
+            f"missing {npz_path} and portable fallback {json_path}"
+        )
+    with open(json_path, encoding="utf-8") as stream:
+        raw = json.load(stream)
+    return {key: np.asarray(value) for key, value in raw.items()}
+
+
 # --------------------------------------------------------------------------
 # validation gate: obs blocks vs IsaacSim clean capture
 # --------------------------------------------------------------------------
 def validate(capture_dir, onnx_path):
     al = Align()
-    C = np.load(os.path.join(capture_dir, "constants.npz"), allow_pickle=True)
+    C = load_runtime_constants(capture_dir)
     steps = [np.load(os.path.join(capture_dir, f"gt_step{t}.npz"), allow_pickle=True)
              for t in range(3)]
     def_il = C["default_joint_pos"].astype(np.float64)
@@ -501,13 +540,12 @@ def run(args):
     import mujoco
 
     al = Align()
-    C = np.load(os.path.join(args.capture_dir, "constants.npz"), allow_pickle=True)
+    C = load_runtime_constants(args.capture_dir)
     def_il = C["default_joint_pos"].astype(np.float64)
     scale_il = C["actterm_joint_pos_scale"].astype(np.float64)
     off_il = C["actterm_joint_pos_offset"].astype(np.float64)
 
-    rb_path = os.path.join(args.capture_dir, "rel_bias.npy")
-    rel_bias = np.load(rb_path) if os.path.exists(rb_path) else None
+    rel_bias = C.get("rel_bias")
 
     model, xml_path, (lo, hi) = build_model(C, arm_kp_mult=args.arm_kp_mult,
                                             waist_kp_mult=args.waist_kp_mult)
@@ -706,9 +744,8 @@ def main():
                     help="side-by-side kinematic reference in the video")
     ap.add_argument("--arm_kp_mult", type=float, default=1.0)
     ap.add_argument("--waist_kp_mult", type=float, default=1.0,
-                    help="waist stiffness multiplier; ~4 emulates IsaacLab's implicit "
-                         "actuator so the torso can hold the routinely limit-pinned "
-                         "waist_pitch reference against gravity (see WAIST_MJ note)")
+                    help="diagnostic-only waist stiffness multiplier; leave at 1.0 "
+                         "for exact AimDK train/sim/deploy PD fidelity")
     ap.add_argument("--adaptive_clock", action="store_true",
                     help="slow reference playback when pose tracking error grows")
     ap.add_argument("--adaptive_joint_soft", type=float, default=0.20)

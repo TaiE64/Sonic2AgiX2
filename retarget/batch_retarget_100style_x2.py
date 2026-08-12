@@ -27,6 +27,7 @@ try:
     from .retarget_quality import (
         ROOT_ANGULAR_VELOCITY_LIMIT,
         ROOT_LINEAR_VELOCITY_LIMIT,
+        X2_ARM_COLLISION_MARGIN,
         foot_collision_geoms,
         joint_limit_report,
         root_motion_metrics,
@@ -36,6 +37,7 @@ except ImportError:  # direct script execution
     from retarget_quality import (
         ROOT_ANGULAR_VELOCITY_LIMIT,
         ROOT_LINEAR_VELOCITY_LIMIT,
+        X2_ARM_COLLISION_MARGIN,
         foot_collision_geoms,
         joint_limit_report,
         root_motion_metrics,
@@ -46,7 +48,7 @@ except ImportError:  # direct script execution
 HERE = pathlib.Path(__file__).resolve().parent
 SR_ROOT = HERE.parent.parent
 GMR_ROOT = SR_ROOT / "GMR"
-DEFAULT_DATA_ROOT = pathlib.Path("/home/byte/Desktop/Byte/datasets/heft_expansion")
+DEFAULT_DATA_ROOT = pathlib.Path("/data/motion/heft_expansion")
 X2_XML = GMR_ROOT / "assets" / "agibot_x2" / "x2_mocap.xml"
 
 SOURCE_FPS = 60
@@ -145,7 +147,7 @@ def _add_collision_avoidance(retargeter):
         _worker["CollisionAvoidanceLimit"](
             model,
             [(geoms_l + geoms_r, geoms_lower), (geoms_l, geoms_r)],
-            minimum_distance_from_collisions=0.02,
+            minimum_distance_from_collisions=X2_ARM_COLLISION_MARGIN,
         )
     )
 
@@ -202,7 +204,7 @@ def qc_checks(qpos, fps):
     velocity = float(np.abs(np.diff(qpos[:, 7:], axis=0)).max() * fps)
     report["max_root_vel"], report["max_root_ang_vel"] = root_motion_metrics(qpos, fps)
     report["at_limit"], unexpected_limits = joint_limit_report(
-        model, mujoco, qpos[:, 7:],
+        model, mujoco, qpos[:, 7:], fps=fps,
     )
     report["unexpected_at_limit"] = unexpected_limits
     foot_geoms = _worker["foot_geoms"]

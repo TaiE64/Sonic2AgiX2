@@ -13,8 +13,7 @@ QC per clip (kinematic + physics-adjacent):
   - sole penetration below ground
   - stance-foot float above ground
   - self-collision fraction (MuJoCo collision query, sampled frames)
-  - per-joint at-limit fractions (recorded; hardware clamps like
-    shoulder_roll adduction are expected and do not fail a clip)
+  - per-joint at-limit fractions and continuous unsafe-branch dwell
 
 Usage (gmr env, from GMR repo root so its assets resolve):
   python ../Any2Any/retarget/batch_retarget_x2.py --subsets ACCAD --workers 12
@@ -38,8 +37,10 @@ try:
     from .retarget_quality import (
         ROOT_ANGULAR_VELOCITY_LIMIT,
         ROOT_LINEAR_VELOCITY_LIMIT,
+        X2_ARM_COLLISION_MARGIN,
         foot_collision_geoms,
         joint_limit_report,
+        limit_joint_velocity,
         root_motion_metrics,
         sole_height,
     )
@@ -47,8 +48,10 @@ except ImportError:  # direct script execution
     from retarget_quality import (
         ROOT_ANGULAR_VELOCITY_LIMIT,
         ROOT_LINEAR_VELOCITY_LIMIT,
+        X2_ARM_COLLISION_MARGIN,
         foot_collision_geoms,
         joint_limit_report,
+        limit_joint_velocity,
         root_motion_metrics,
         sole_height,
     )
@@ -57,7 +60,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 ANY2ANY_ROOT = HERE.parent
 SR_ROOT = ANY2ANY_ROOT.parent              # Sonic_Retarget/
 GMR_ROOT = SR_ROOT / "GMR"
-AMASS_ROOT = SR_ROOT / "SMPL-X_N"
+AMASS_ROOT = pathlib.Path(os.environ.get(
+    "X2_AMASS_ROOT", "/data/motion/AMASS/SMPL-X_N",
+))
 OUT_ROOT = ANY2ANY_ROOT / "retargeted_dataset"
 X2_XML = GMR_ROOT / "assets" / "agibot_x2" / "x2_mocap.xml"
 
@@ -162,16 +167,17 @@ def _load_subject_segment(path, start_frame=None, end_frame=None):
 
 def worker_init(canonical=True, canonical_height=1.8):
     sys.path.insert(0, str(GMR_ROOT))
+    sys.path.insert(0, str(HERE))
     os.chdir(GMR_ROOT)  # GMR resolves assets relative to its root
     import torch
     torch.set_num_threads(1)        # workers each spawning 32 threads thrashes
     torch.set_grad_enabled(False)   # smplx forward needs no autograd: ~2x memory
     import mujoco
-    from general_motion_retargeting import GeneralMotionRetargeting as GMR  # noqa
+    from native_gmr import NativeGMR  # noqa
     from general_motion_retargeting.utils.smpl import get_smplx_data_offline_fast  # noqa
     from mink.limits import CollisionAvoidanceLimit  # noqa
     _worker["mujoco"] = mujoco
-    _worker["GMR"] = GMR
+    _worker["GMR"] = NativeGMR
     _worker["CollisionAvoidanceLimit"] = CollisionAvoidanceLimit
     _worker["frames"] = get_smplx_data_offline_fast
     _worker["canonical"] = bool(canonical)
@@ -228,7 +234,9 @@ def qc_checks(qpos, fps):
     rep["max_joint_vel"] = float(vel)
 
     rep["max_root_vel"], rep["max_root_ang_vel"] = root_motion_metrics(qpos, fps)
-    rep["at_limit"], unexpected_limits = joint_limit_report(model, mujoco, dof)
+    rep["at_limit"], unexpected_limits = joint_limit_report(
+        model, mujoco, dof, fps=fps,
+    )
     rep["unexpected_at_limit"] = unexpected_limits
 
     foot_geoms = _worker["foot_geoms"]
@@ -320,6 +328,21 @@ def segment_output_path(out_path, part_index, part_count):
     )
 
 
+def recipe_locomotion_paths(manifest_path, splits=("train", "val", "test")):
+    """Return AMASS-relative locomotion sources selected by the recipe manifest."""
+    allowed_splits = set(splits)
+    paths = []
+    with open(manifest_path, encoding="utf-8") as stream:
+        for line in stream:
+            entry = json.loads(line)
+            if (
+                entry.get("category") == "locomotion"
+                and entry.get("split") in allowed_splits
+            ):
+                paths.append(pathlib.Path(entry["path"]))
+    return paths
+
+
 def clip_tasks(rel):
     """Expand one source path into independently retargetable segment tasks."""
     src = AMASS_ROOT / rel
@@ -398,19 +421,19 @@ def retarget_frames(frames, fps, human_height):
     geoms_l, geoms_r, geoms_lower = body_geoms(arm_l), body_geoms(arm_r), body_geoms(lower)
     rt.ik_limits.append(_worker["CollisionAvoidanceLimit"](
         model, [(geoms_l + geoms_r, geoms_lower), (geoms_l, geoms_r)],
-        minimum_distance_from_collisions=0.02,
+        minimum_distance_from_collisions=X2_ARM_COLLISION_MARGIN,
     ))
     for _ in range(20):
         rt.retarget(frames[0])
 
-    step = 12.0 / fps
     qpos, previous = [], None
     for frame in frames:
         current = rt.retarget(frame).copy()
-        if previous is not None and np.abs(current[7:] - previous[7:]).max() > step:
-            current[7:] = previous[7:] + np.clip(
-                current[7:] - previous[7:], -step, step,
-            )
+        # No low-pass on the reference: a constant-gain filter throttles fast
+        # transients (punches lose ~2/3 of their joint velocity).  Keep only
+        # the per-frame velocity clamp as a safety net against IK jumps.
+        current, clipped = limit_joint_velocity(previous, current, fps)
+        if clipped:
             rt.configuration.update(current)
         qpos.append(current.copy())
         previous = current
@@ -475,7 +498,7 @@ def process_clip(args):
 
 
 def main():
-    global GROUND_SNAP, MAX_SECONDS
+    global OUT_ROOT, GROUND_SNAP, MAX_SECONDS
     ap = argparse.ArgumentParser()
     ap.add_argument("--subsets", nargs="+", default=[])
     ap.add_argument("--workers", type=int, default=12)
@@ -498,6 +521,10 @@ def main():
     ap.add_argument("--clip_list", default=None,
                     help="file of AMASS-relative npz paths (one per line); "
                          "overrides --subsets scanning")
+    ap.add_argument("--recipe_manifest", default=None,
+                    help="recipe JSONL; retarget only category=locomotion")
+    ap.add_argument("--recipe_splits", nargs="+", default=["train", "val", "test"],
+                    help="splits selected from --recipe_manifest")
     ap.add_argument("--out_root", default=None,
                     help="output dir override (keeps the original "
                          "retargeted_dataset untouched for parallel versions)")
@@ -511,9 +538,15 @@ def main():
                          "in canonical mode (default 1.8 m)")
     args = ap.parse_args()
 
-    global OUT_ROOT
+    if args.clip_list and args.recipe_manifest:
+        ap.error("--clip_list and --recipe_manifest are mutually exclusive")
+    if not AMASS_ROOT.is_dir():
+        ap.error(f"AMASS source root does not exist: {AMASS_ROOT}")
+
     if args.out_root:
-        OUT_ROOT = pathlib.Path(args.out_root)
+        # Workers chdir into GMR_ROOT while loading the retargeter.  Resolve the
+        # override here so their output paths do not become relative to GMR.
+        OUT_ROOT = pathlib.Path(args.out_root).resolve()
     GROUND_SNAP = args.ground_snap
     MAX_SECONDS = args.max_seconds
 
@@ -547,7 +580,11 @@ def main():
         listed = [pathlib.Path(l.strip()) for l in open(args.clip_list) if l.strip()]
         print(f"clip_list: {len(listed)} entries")
         source_clips.extend(listed)
-    for sub in (args.subsets if not args.clip_list else []):
+    elif args.recipe_manifest:
+        listed = recipe_locomotion_paths(args.recipe_manifest, args.recipe_splits)
+        print(f"recipe locomotion: {len(listed)} entries")
+        source_clips.extend(listed)
+    for sub in (args.subsets if not (args.clip_list or args.recipe_manifest) else []):
         root = AMASS_ROOT / sub
         for p in sorted(root.rglob("*_stageii.npz")):
             if "stagei" in p.name and "stageii" not in p.name:

@@ -10,32 +10,11 @@ import isaaclab.sim as sim_utils
 
 ASSET_DIR = "gear_sonic/data/assets"
 
-# REPRODUCTION APPROXIMATION (repro-plan gap: vendor PD gains for the X2 are
-# unknown). We reuse the G1/H2 gain scheme, which derives stiffness/damping
-# from the reflected rotor inertia (armature) of a motor class and a target
-# closed-loop response: K = armature * w^2, D = 2 * zeta * armature * w with
-# w = 2*pi*10Hz and zeta = 2. X2 joints are assigned to the existing motor
-# classes by matching each joint's URDF effort limit to the same-role joint on
-# G1 (35 kg) / H2 (larger, same 31-DoF layout); X2 (~42 kg, URDF total 41.97) effort
-# limits sit between the two, so the class assignment (not the absolute
-# gains) is what is matched:
-#
-#   X2 joint (URDF effort)          class      G1 analog (effort) / H2 analog
-#   hip pitch/roll, knee (120)      7520_22    hip/knee (139) / (417)
-#   hip yaw (120)                   7520_14    hip yaw (88) / (264)
-#   waist yaw (120)                 7520_14    waist yaw (88) / (264)
-#   waist pitch/roll (48)           2x 5020    waist roll/pitch (50) / (150)
-#   ankle pitch/roll (36/24)        2x 5020    ankles (50) / (150)
-#   shoulder p/r (36), y (24),
-#   elbow (24), wrist yaw (24)      5020       shoulder/elbow/wrist_roll (25)
-#   wrist pitch/roll (4.8)          4010       wrist pitch/yaw (5)
-#   head yaw/pitch (2.6/0.6)        4010       small actuators; H2's 2x 5020
-#                                              head gains are far too stiff
-#                                              for the X2's 2.6/0.6 Nm motors
-#
-# Note the X2 wrist chain is yaw->pitch->roll (forearm rotation first), so the
-# X2 wrist_yaw plays the role of the G1 wrist_roll (5020 class) and the X2
-# wrist pitch/roll are the small distal 4010-class joints.
+# The 29 RL-controlled joints use the exact vendor gains from AimDK
+# v1.0.0-ga424add, motion_control.yaml -> rl_config.kps/kds.  The two head
+# joints are not policy actions: Any2Any maps the 29-D policy output to the
+# 31-DoF articulation with both head residuals fixed at zero.  Their existing
+# low-level hold gains therefore remain separate from X2_RL_KP/X2_RL_KD.
 # Effort/velocity limits below are taken directly from the X2 URDF.
 
 ARMATURE_5020 = 0.003609725
@@ -55,6 +34,31 @@ DAMPING_5020 = 2.0 * DAMPING_RATIO * ARMATURE_5020 * NATURAL_FREQ
 DAMPING_7520_14 = 2.0 * DAMPING_RATIO * ARMATURE_7520_14 * NATURAL_FREQ
 DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
 DAMPING_4010 = 2.0 * DAMPING_RATIO * ARMATURE_4010 * NATURAL_FREQ
+
+X2_RL_KP = {
+    "hip_pitch": 120.0,
+    "hip_roll": 100.0,
+    "hip_yaw": 100.0,
+    "knee": 150.0,
+    "ankle": 40.0,
+    "waist_yaw": 40.1792,
+    "waist_pitch_roll": 200.0,
+    "shoulder": 50.0,
+    "elbow": 50.0,
+    "wrist": 20.0,
+}
+X2_RL_KD = {
+    "hip_pitch": 5.0,
+    "hip_roll": 4.0,
+    "hip_yaw": 4.0,
+    "knee": 5.0,
+    "ankle": 2.0,
+    "waist_yaw": 2.5579,
+    "waist_pitch_roll": 2.0,
+    "shoulder": 3.0,
+    "elbow": 3.0,
+    "wrist": 2.0,
+}
 
 # IsaacLab enumerates joints/bodies breadth-first over the URDF kinematic tree
 # (verified against the known-correct g1.py mapping). MuJoCo order is the
@@ -189,16 +193,16 @@ X2_CFG = ArticulationCfg(
                 ".*_knee_joint": 11.936,
             },
             stiffness={
-                ".*_hip_pitch_joint": STIFFNESS_7520_22,
-                ".*_hip_roll_joint": STIFFNESS_7520_22,
-                ".*_hip_yaw_joint": STIFFNESS_7520_14,
-                ".*_knee_joint": STIFFNESS_7520_22,
+                ".*_hip_pitch_joint": X2_RL_KP["hip_pitch"],
+                ".*_hip_roll_joint": X2_RL_KP["hip_roll"],
+                ".*_hip_yaw_joint": X2_RL_KP["hip_yaw"],
+                ".*_knee_joint": X2_RL_KP["knee"],
             },
             damping={
-                ".*_hip_pitch_joint": DAMPING_7520_22,
-                ".*_hip_roll_joint": DAMPING_7520_22,
-                ".*_hip_yaw_joint": DAMPING_7520_14,
-                ".*_knee_joint": DAMPING_7520_22,
+                ".*_hip_pitch_joint": X2_RL_KD["hip_pitch"],
+                ".*_hip_roll_joint": X2_RL_KD["hip_roll"],
+                ".*_hip_yaw_joint": X2_RL_KD["hip_yaw"],
+                ".*_knee_joint": X2_RL_KD["knee"],
             },
             armature={
                 ".*_hip_pitch_joint": ARMATURE_7520_22,
@@ -217,24 +221,24 @@ X2_CFG = ArticulationCfg(
                 ".*_ankle_pitch_joint": 13.087,
                 ".*_ankle_roll_joint": 15.077,
             },
-            stiffness=2.0 * STIFFNESS_5020,
-            damping=2.0 * DAMPING_5020,
+            stiffness=X2_RL_KP["ankle"],
+            damping=X2_RL_KD["ankle"],
             armature=2.0 * ARMATURE_5020,
         ),
         "waist": ImplicitActuatorCfg(
             effort_limit_sim=48.0,
             velocity_limit_sim=13.088,
             joint_names_expr=["waist_roll_joint", "waist_pitch_joint"],
-            stiffness=2.0 * STIFFNESS_5020,
-            damping=2.0 * DAMPING_5020,
+            stiffness=X2_RL_KP["waist_pitch_roll"],
+            damping=X2_RL_KD["waist_pitch_roll"],
             armature=2.0 * ARMATURE_5020,
         ),
         "waist_yaw": ImplicitActuatorCfg(
             effort_limit_sim=120.0,
             velocity_limit_sim=11.936,
             joint_names_expr=["waist_yaw_joint"],
-            stiffness=STIFFNESS_7520_14,
-            damping=DAMPING_7520_14,
+            stiffness=X2_RL_KP["waist_yaw"],
+            damping=X2_RL_KD["waist_yaw"],
             armature=ARMATURE_7520_14,
         ),
         "head": ImplicitActuatorCfg(
@@ -280,22 +284,22 @@ X2_CFG = ArticulationCfg(
                 ".*_wrist_roll_joint": 4.188,
             },
             stiffness={
-                ".*_shoulder_pitch_joint": STIFFNESS_5020,
-                ".*_shoulder_roll_joint": STIFFNESS_5020,
-                ".*_shoulder_yaw_joint": STIFFNESS_5020,
-                ".*_elbow_joint": STIFFNESS_5020,
-                ".*_wrist_yaw_joint": STIFFNESS_5020,
-                ".*_wrist_pitch_joint": STIFFNESS_4010,
-                ".*_wrist_roll_joint": STIFFNESS_4010,
+                ".*_shoulder_pitch_joint": X2_RL_KP["shoulder"],
+                ".*_shoulder_roll_joint": X2_RL_KP["shoulder"],
+                ".*_shoulder_yaw_joint": X2_RL_KP["shoulder"],
+                ".*_elbow_joint": X2_RL_KP["elbow"],
+                ".*_wrist_yaw_joint": X2_RL_KP["wrist"],
+                ".*_wrist_pitch_joint": X2_RL_KP["wrist"],
+                ".*_wrist_roll_joint": X2_RL_KP["wrist"],
             },
             damping={
-                ".*_shoulder_pitch_joint": DAMPING_5020,
-                ".*_shoulder_roll_joint": DAMPING_5020,
-                ".*_shoulder_yaw_joint": DAMPING_5020,
-                ".*_elbow_joint": DAMPING_5020,
-                ".*_wrist_yaw_joint": DAMPING_5020,
-                ".*_wrist_pitch_joint": DAMPING_4010,
-                ".*_wrist_roll_joint": DAMPING_4010,
+                ".*_shoulder_pitch_joint": X2_RL_KD["shoulder"],
+                ".*_shoulder_roll_joint": X2_RL_KD["shoulder"],
+                ".*_shoulder_yaw_joint": X2_RL_KD["shoulder"],
+                ".*_elbow_joint": X2_RL_KD["elbow"],
+                ".*_wrist_yaw_joint": X2_RL_KD["wrist"],
+                ".*_wrist_pitch_joint": X2_RL_KD["wrist"],
+                ".*_wrist_roll_joint": X2_RL_KD["wrist"],
             },
             armature={
                 ".*_shoulder_pitch_joint": ARMATURE_5020,

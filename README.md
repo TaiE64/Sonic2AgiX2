@@ -7,9 +7,19 @@ Closed-loop policy in MuJoCo (left) vs. reference (right):
 Reproduction of the **Any2Any** cross-embodiment transfer (arXiv:2605.23733) that
 adapts NVIDIA's GEAR-SONIC whole-body controller (trained for the Unitree G1) onto
 the **AgiBot X2 Ultra** humanoid (31 DoF), via LoRA on the actor dynamics decoder +
-critic with a fixed kinematic G1↔X2 alignment. This drop covers **v19** (deployed)
-and the **v20** data-fix retrain (rebuilt retargeting: neutral canonical shape,
-exact 30 Hz grid, ground snap, bad-clip rejection).
+critic with a fixed kinematic G1↔X2 alignment. This drop covers **v21** (deployed
+WBT: OMOMO SR 97%, LAFAN 72.9%), the dedicated **X2 Locomotion** fine-tune
+(velocity/yaw-rate command tracking on ground-snapped planner references), and the
+full retargeting pipeline with per-clip QC.
+
+**2026-08 update**: NativeGMR solve path + analytic collision limits;
+locomotion reference generator with FK ground snap + contact QC (planner root
+height is G1-scale and floats ~10 cm on the X2 otherwise); WASD teleop harness
+(`sim2sim/planner_teleop_x2.py`) with a human gait-cycle walk reference (the
+planner's slow-walk gait is left/right asymmetric at the source); GMR fork
+deltas split out into `gmr_x2_overlay/`. Batch QC sample (214 AMASS clips):
+59% pass, rejections dominated by the X2's ±18° waist-pitch envelope on
+torso-bend motions.
 
 > **This repository is an overlay, not a standalone runtime.** It contains only the
 > code we wrote (retargeting, kinematic alignment, LoRA wiring, the MuJoCo sim2sim
@@ -38,6 +48,9 @@ any2any_train/          LoRA + kinematic-alignment core
 retarget/               AMASS/LAFAN/OMOMO → X2 retargeting pipeline
   batch_retarget_*.py, retarget_x2.py, kinematic_alignment.py, calibrate_offsets.py, ...
 sim2sim/                MuJoCo closed-loop validation harness (no Isaac Sim needed)
+                        + planner_teleop_x2.py: real-time WASD teleop (planner-driven)
+gmr_x2_overlay/         our deltas on the YanjieZe/GMR fork: upstream patch +
+                        calibrated X2 ik_configs (see its README)
   mujoco_sim2sim_x2.py    obs-contract gate + physics rollout + video
 gear_sonic_x2_overlay/  X2 robot config to drop into the GR00T tree
   x2.py                   -> gear_sonic/envs/manager_env/robots/x2.py

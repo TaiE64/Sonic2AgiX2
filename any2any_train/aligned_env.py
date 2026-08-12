@@ -30,6 +30,7 @@ import numpy as np
 import torch
 
 _HERE = pathlib.Path(__file__).resolve().parent
+_SONIC_ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE))
 from kinematic_alignment import (  # noqa: E402
@@ -37,7 +38,9 @@ from kinematic_alignment import (  # noqa: E402
     PHI_PINV, N_TARGET, T_SOURCE, X2_MUJOCO_JOINTS,
 )
 
-sys.path.insert(0, "/home/taie/Desktop/Byte/Sonic_Retarget/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/robots")
+sys.path.insert(0, str(
+    _SONIC_ROOT / "GR00T-WholeBodyControl/gear_sonic/envs/manager_env/robots"
+))
 try:
     from x2 import X2_ISAACLAB_TO_MUJOCO_MAPPING  # noqa: E402
 except ModuleNotFoundError:  # outside Isaac Sim: use the selftest's stubs

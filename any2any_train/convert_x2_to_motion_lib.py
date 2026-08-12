@@ -4,7 +4,8 @@ Mirrors gear_sonic/data_process/convert_soma_csv_to_motion_lib.py exactly
 (same output keys / dtypes / conventions), but for the AgiBot X2:
 
   input  (batch_retarget_x2.py output):
-      {robot, fps, root_pos (T,3), root_rot (T,4 wxyz), dof_pos (T,31), source}
+      {robot, fps, root_pos (T,3), root_rot (T,4 wxyz),
+       dof_pos (T,29 controlled or T,31 articulation), source}
   output (motion_lib directory mode, one joblib pkl per motion):
       {root_trans_offset (T,3) f32,
        pose_aa (T, 1+31, 3) f32,   # [0]=root rotvec, [1+j]=axis_j * dof_j
@@ -105,8 +106,12 @@ def convert_one(pkl_path: pathlib.Path, node_table) -> dict:
         d = pickle.load(f)
     root_pos = np.asarray(d["root_pos"], dtype=np.float32)          # (T,3)
     root_rot_wxyz = np.asarray(d["root_rot"], dtype=np.float32)     # (T,4) wxyz
-    dof = np.asarray(d["dof_pos"], dtype=np.float32)                # (T,31)
+    dof = np.asarray(d["dof_pos"], dtype=np.float32)
     T = len(root_pos)
+    if dof.shape == (T, 29):
+        # The policy controls 29 joints.  The X2 articulation has two extra
+        # head joints, held neutral only inside the simulator motion schema.
+        dof = np.pad(dof, ((0, 0), (0, 2)), mode="constant")
     assert dof.shape == (T, N_DOF), f"{pkl_path}: dof {dof.shape}"
 
     # Clamp the 4 chain-end wrist joints to IsaacLab SOFT limits (mid +/- 0.9*half).

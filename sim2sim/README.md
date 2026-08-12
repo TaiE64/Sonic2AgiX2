@@ -3,31 +3,58 @@
 把 Sonic→X2 (Any2Any) 训好的策略拿到 MuJoCo 物理里闭环跑,验证 sim2sim 迁移。
 详细复现记录见 `../BUGS_AND_FIXES.md` 的 "sim2sim MuJoCo 部署重建" 一节。
 
-## 目录约定:每个策略版本一个文件夹
+## 可移交的交互行走 Demo
+
+这个入口只依赖 Python、MuJoCo 和 ONNX Runtime，不需要 Isaac Sim、
+Isaac Lab、PyTorch 或训练数据。
+
+```bash
+cd Any2Any/sim2sim
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-walking.txt
+
+# 按 models/README.md 放入两个 ONNX 文件后：
+./run_walking_demo.sh --speed 0.5
+```
+
+按住 `W` 前进，`Shift+W` 跑，`S` 后退，`A/D` 转向，`+/-` 调速，
+`Esc` 退出。当前 V21 step 12000 在 MuJoCo 中以 `--speed 0.5` 测得：
+`W` 的 walk trajectory 实际约 `0.115 m/s`，`Shift+W` 的 run trajectory
+实际约 `0.45 m/s`；这里的参数是 planner 目标，不是根速度闭环设定值。
+程序会直接从 ONNX 图检测 observation block 顺序；不要为不同导出版本
+硬编码 `cmf|maob|pro`。
+
+运行所需的 X2 MJCF/meshes 已在 `../../GMR/assets/agibot_x2/`。策略和
+planner 权重不进普通 Git；文件名、大小、校验值及模型许可证见
+`models/README.md` 与 `licenses/`。
+
+发送单个压缩包时，可在有模型文件的机器上执行：
+
+```bash
+./build_walking_bundle.sh /path/to/model_step_012000_g1.onnx \
+  /path/to/planner_sonic.onnx
+```
+
+脚本会校验两个模型的 SHA-256，并生成包含代码、X2 meshes、模型和许可证的
+`walking_demo_v21_s12000.tar.gz`。
+
+## 当前目录
 
 ```
 sim2sim/
   mujoco_sim2sim_x2.py     harness
   run_sim2sim.sh           一键管线
   README.md
-  x2_sim2sim_generated.xml 每次跑自动生成的物理模型(可删)
-  v17/                     ← V17,按用途分子目录(v13/v15 及 v17_BEST 权重已于
-                             2026-07-20 清理;capture/ 因 v19 依赖保留):
-    capture/               该版本 obs 真值
-    benchmark/             数据集片段实测(LAFAN/AMASS 具名 clip + 日志)
-    demos/                 能力演示(moonwalk/waltz/单腿/恢复跨步/凌空踢…)
-    video_tracking/        手机视频→机器人跟踪成品(video2robot.sh 输出)
-  v19/                     ← V19 (step9000 导出);无 capture,块序用 --block_order
-                             或对 v17 capture 自动检测(已验证可行):
-    demos/                 能力演示(13 条 AMASS clip)
-    demos_inplace_hard_s9000/    原地高难度 battery(11 条 + results.txt)
-    demos_inplace_hard_s12000/   同一 battery @续训 step12000(对比用)
-    generalization/        手机视频泛化测试
+  capture/                 V21 obs 真值，harness 默认从这里读取
+  out/                     V21 planner / teleop 近期验证输出
+  v21_s10000/demos/        V21 step 10000 回归对比
+  v21_s12000/demos/        V21 step 12000 当前部署演示
 ```
 
-每个版本自带 `capture/`(从 IsaacSim 捕获的干净真值 constants.npz / gt_step0..2.npz /
-rel_bias.npy),让 harness 无需 IsaacSim 即可独立跑该版本的 `--validate` 和闭环渲染。
-`--capture_dir` 不传时自动选**最新**的 `v*/capture`。
+`capture/` 含从 IsaacSim 捕获的干净真值 `constants.npz` / `gt_step0..2.npz` /
+`rel_bias.npy`，让 harness 无需 IsaacSim 即可跑 `--validate` 和闭环渲染。
+`--capture_dir` 不传时默认使用 `./capture`。
 
 ## 文件
 
@@ -41,28 +68,25 @@ rel_bias.npy),让 harness 无需 IsaacSim 即可独立跑该版本的 `--validat
 ## 用法
 
 ```bash
-# 一键全流程(每个版本各自成文件夹):
-#   last.pt:
-bash run_sim2sim.sh logs_rl/.../sonic2x2_v13_lora64-20260710_223237 v13 walk1_subject1 1500
-#   具名快照(V15):
-bash run_sim2sim.sh logs_rl/.../sonic2x2_v13_lora64-20260711_154525 v15 jumps1_subject1 1500 \
-     logs_rl/.../sonic2x2_v13_lora64-20260711_154525/snap_v15_iter5499.pt
+# 从 GR00T-WholeBodyControl/ 执行，使用当前 V21 step 12000:
+bash ../Any2Any/sim2sim/run_sim2sim.sh \
+  logs_rl/TRL_X2_Track/v21 v21_s12000 walk1_subject1 1500 \
+  logs_rl/TRL_X2_Track/v21/model_step_012000.pt
 
-# 手动验证门(纯 CPU;--capture_dir 不传=自动选最新版本):
-python mujoco_sim2sim_x2.py --validate --onnx <run_dir>/exported/model_step_XXXXXX_g1.onnx
+# 手动验证门（纯 CPU；--capture_dir 不传时使用 ./capture）:
+python mujoco_sim2sim_x2.py --validate \
+  --onnx ../../GR00T-WholeBodyControl/logs_rl/TRL_X2_Track/v21/exported/model_step_012000_g1.onnx
 
 # 单条 clip 闭环 + 视频(手动指定版本 capture 与输出):
 MUJOCO_GL=egl python mujoco_sim2sim_x2.py --clip walk1_subject1 --steps 1500 \
-    --onnx <run_dir>/exported/..._g1.onnx --capture_dir v15/capture \
-    --render v15/walk1_subject1.mp4 --ref_ghost
+    --onnx ../../GR00T-WholeBodyControl/logs_rl/TRL_X2_Track/v21/exported/model_step_012000_g1.onnx \
+    --capture_dir capture --render out/walk1_subject1.mp4 --ref_ghost
 ```
 
 ## 结果快照
 
-- **V13 (iter12350)** — `v13/`:walk/jumps1/dance2/aiming2 全程 30s 零摔倒;fight/fightAndSports/sprint
-  在 11–17s 摔(root ori>46° 失衡)。
-- **V15 (iter5499, jump 专项)** — `v15/`:平衡更稳,sprint 摔@21.8s(v13 仅 10.9s)、fight 19.4s、
-  关节误差普遍更低;跳跃/腾跃(jumps2/leap_demo)摔在腾空/落地相(root_h 高度发散,MuJoCo 落地接触 gap)。
+- **V21 step 12000** — 当前部署版本；演示见 `v21_s12000/demos/`，planner / teleop 闭环结果见 `out/`。
+- **V21 step 10000** — 仅作同版本回归对比，不是默认部署入口。
 
 验证门标准:proprio 精确 0.0000、maob ~1e-5、cmf ~0.05(30→50fps 插值底噪)、端到端动作 ~0.1(FSQ 容忍)。
 

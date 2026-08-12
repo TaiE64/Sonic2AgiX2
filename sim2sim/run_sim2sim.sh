@@ -18,10 +18,11 @@
 # the --validate stage catches it — if section A errors are >1, re-run the
 # permutation test (see mujoco_sim2sim_x2.py docstring) and fix ObsBuilder.build.
 set -e
-cd /home/taie/Desktop/Byte/Sonic_Retarget/GR00T-WholeBodyControl
+S2S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+A2A=$(cd "$S2S/.." && pwd)
+SONIC_ROOT=$(cd "$A2A/.." && pwd)
+cd "$SONIC_ROOT/GR00T-WholeBodyControl"
 PY=/home/taie/miniconda3/envs/isaaclab/bin/python
-A2A=/home/taie/Desktop/Byte/Sonic_Retarget/Any2Any
-S2S=$A2A/sim2sim
 RUN=$1
 VER=${2:?usage: run_sim2sim.sh <run_dir> <version> [clip] [steps] [ckpt]}
 CLIP=${3:-walk1_subject1}
