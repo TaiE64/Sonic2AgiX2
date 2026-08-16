@@ -50,8 +50,15 @@ MODE_NAMES = {0: "IDLE", 1: "SLOW_WALK", 2: "WALK", 3: "RUN"}
 
 
 class Planner:
-    def __init__(self, onnx_path=PLANNER):
-        self.s = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    def __init__(self, onnx_path=PLANNER, intra_threads=0):
+        """intra_threads>0 caps ONNX intra-op threads.  On a robot that also runs
+        the 50 Hz control policy, the default (all cores) lets a ~200 ms planner
+        burst starve the policy's 20 ms step budget."""
+        opts = ort.SessionOptions()
+        if intra_threads > 0:
+            opts.intra_op_num_threads = intra_threads
+        self.s = ort.InferenceSession(onnx_path, sess_options=opts,
+                                      providers=["CPUExecutionProvider"])
         self.inames = {i.name for i in self.s.get_inputs()}
 
     def run(self, context, mode, movement, facing, speed=-1.0, height=-1.0, seed=1234):

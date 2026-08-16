@@ -302,6 +302,8 @@ def setup(args):
         if order is None:
             raise RuntimeError("could not detect observation block order from the policy ONNX")
     rm = ReferenceManager(PL.Planner(args.planner), al)
+    if getattr(args, "no_cycle", False):
+        rm.cycle = None      # forward walk from the planner, as the robot's refsrc runs it
 
     ob = S.ObsBuilder(al, types.SimpleNamespace(dof=np.zeros((2, 31)), T=2,
                       rot=np.array([[1.0, 0, 0, 0]] * 2)), def_il, rel_bias=rel_bias, order=order)
@@ -497,6 +499,9 @@ def main():
     ap.add_argument("--planner", default=PL.PLANNER)
     ap.add_argument("--speed", type=float, default=-1.0,
                     help="initial planner target speed in m/s (-1 uses the mode default)")
+    ap.add_argument("--no-cycle", dest="no_cycle", action="store_true",
+                    help="forward walk from the planner instead of the human walk cycle; "
+                         "matches what the robot's planner_refsrc_x2.py generates")
     ap.add_argument("--script", action="store_true", help="headless scripted self-test -> mp4")
     ap.add_argument("--seconds", type=float, default=16.0)
     ap.add_argument("--render", default="out/teleop_selftest.mp4")
