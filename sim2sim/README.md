@@ -1,94 +1,118 @@
-# sim2sim — MuJoCo 部署验证
+# MuJoCo validation and keyboard teleoperation
 
-把 Sonic→X2 (Any2Any) 训好的策略拿到 MuJoCo 物理里闭环跑,验证 sim2sim 迁移。
-详细复现记录见 `../BUGS_AND_FIXES.md` 的 "sim2sim MuJoCo 部署重建" 一节。
+[Project overview](../README.md) · [中文项目介绍](../README.zh-CN.md)
 
-## 可移交的交互行走 Demo
+Run a compatible Sonic2AgiX2 policy in MuJoCo, compare it with a motion reference, or drive it with the SONIC locomotion planner. Inference does not require Isaac Sim or PyTorch. Training, ONNX export, and generation of Isaac Lab ground-truth captures remain separate steps.
 
-这个入口只依赖 Python、MuJoCo 和 ONNX Runtime，不需要 Isaac Sim、
-Isaac Lab、PyTorch 或训练数据。
+## Required assets
+
+This source checkout includes the scripts and [runtime_constants.json](runtime_constants.json), but **does not include**:
+
+- An X2 policy ONNX or the SONIC planner ONNX.
+- The X2 MJCF and its referenced mesh files.
+- Retargeted motion clips, `human_walk_cycle.npz`, or Isaac Lab `capture/` files.
+- The `models/README.md`, `licenses/`, or recorded demo directories referenced by older internal instructions.
+
+Use a policy compatible with the included alignment and runtime constants. A policy trained with different joint ordering, gains, or observation conventions needs its matching configuration. Obtain third-party assets under their providers' terms.
+
+## Interactive demo
+
+The commands below assume a Linux machine with a working graphical display and compatible assets already available. Replace every `/path/to/` value. From the repository root:
 
 ```bash
-cd Any2Any/sim2sim
+export SONIC2X2_ROOT="$PWD"
+export PYTHONPATH="$SONIC2X2_ROOT/retarget:$SONIC2X2_ROOT/any2any_train${PYTHONPATH:+:$PYTHONPATH}"
+export X2_MJCF="/path/to/agibot_x2/x2_mocap.xml"
+
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements-walking.txt
+python -m pip install -r sim2sim/requirements-walking.txt
 
-# 按 models/README.md 放入两个 ONNX 文件后：
-./run_walking_demo.sh --speed 0.5
+bash sim2sim/run_walking_demo.sh \
+  --onnx /path/to/x2_policy.onnx \
+  --planner /path/to/planner_sonic.onnx \
+  --speed 0.5
 ```
 
-按住 `W` 前进，`Shift+W` 跑，`S` 后退，`A/D` 转向，`+/-` 调速，
-`Esc` 退出。当前 V21 step 12000 在 MuJoCo 中以 `--speed 0.5` 测得：
-`W` 的 walk trajectory 实际约 `0.115 m/s`，`Shift+W` 的 run trajectory
-实际约 `0.45 m/s`；这里的参数是 planner 目标，不是根速度闭环设定值。
-程序会直接从 ONNX 图检测 observation block 顺序；不要为不同导出版本
-硬编码 `cmf|maob|pro`。
+The shell wrapper uses `python3` from the active environment; set `DEMO_PYTHON` to select another interpreter. Supply `--onnx` explicitly: the script's default points to an author's external `X2_Locomotion` checkpoint.
 
-运行所需的 X2 MJCF/meshes 已在 `../../GMR/assets/agibot_x2/`。策略和
-planner 权重不进普通 Git；文件名、大小、校验值及模型许可证见
-`models/README.md` 与 `licenses/`。
+| Input | Action |
+|---|---|
+| Hold `W` | Walk forward |
+| Hold `Shift+W` | Run forward |
+| Hold `S` | Walk backward |
+| Hold `A` / `D` | Turn left / right |
+| Release movement keys | Stand |
+| `+` / `-` | Adjust planner target speed |
+| Mouse drag / scroll | Orbit / zoom |
+| `Esc` | Quit |
 
-发送单个压缩包时，可在有模型文件的机器上执行：
+`--speed` sets a **planner target**, not a guaranteed measured robot velocity. When an externally prepared `human_walk_cycle.npz` is present in this directory, forward walking can use that cycle. Without it, the planner supplies the reference; `--no-cycle` explicitly selects planner-based walking.
+
+The teleop code normally detects observation-block order from the ONNX graph. Do not assume that every policy export uses the same order.
+
+## Headless teleop recording
+
+The scripted recording path also imports OpenCV. On a Linux host with EGL rendering available:
 
 ```bash
-./build_walking_bundle.sh /path/to/model_step_012000_g1.onnx \
-  /path/to/planner_sonic.onnx
+python -m pip install opencv-python-headless
+mkdir -p /path/to/output
+
+MUJOCO_GL=egl python sim2sim/planner_teleop_x2.py \
+  --onnx /path/to/x2_policy.onnx \
+  --planner /path/to/planner_sonic.onnx \
+  --script --seconds 16 \
+  --render /path/to/output/teleop.mp4
 ```
 
-脚本会校验两个模型的 SHA-256，并生成包含代码、X2 meshes、模型和许可证的
-`walking_demo_v21_s12000.tar.gz`。
+Use the Python entry point directly here: `run_walking_demo.sh` intentionally unsets `MUJOCO_GL` for interactive use.
 
-## 当前目录
+## Validate the observation contract
 
-```
-sim2sim/
-  mujoco_sim2sim_x2.py     harness
-  run_sim2sim.sh           一键管线
-  README.md
-  capture/                 V21 obs 真值，harness 默认从这里读取
-  out/                     V21 planner / teleop 近期验证输出
-  v21_s10000/demos/        V21 step 10000 回归对比
-  v21_s12000/demos/        V21 step 12000 当前部署演示
-```
-
-`capture/` 含从 IsaacSim 捕获的干净真值 `constants.npz` / `gt_step0..2.npz` /
-`rel_bias.npy`，让 harness 无需 IsaacSim 即可跑 `--validate` 和闭环渲染。
-`--capture_dir` 不传时默认使用 `./capture`。
-
-## 文件
-
-- `mujoco_sim2sim_x2.py` — harness。`--validate` 是 obs 契约验证门(纯 CPU,逐块对
-  IsaacSim 干净真值);默认闭环跑 MuJoCo 物理并渲染视频。obs 契约细节写在文件头 docstring。
-  捕获探针在 `../../GR00T-WholeBodyControl/gear_sonic/train_agent_trl.py` 的 PLAY 块(ANY2ANY_CAPTURE)。
-- `run_sim2sim.sh <run_dir> <version> [clip] [steps] [ckpt]` — 一键管线:merge LoRA →
-  导 ONNX(需 IsaacSim)→ 捕获真值到 `<version>/capture` → 验证门 → 闭环渲染到 `<version>/<clip>.mp4`。
-  `ckpt` 省略=用 run 的 last.pt(会快照);也可传具名快照(如 `snap_v15_iter5499.pt`)。
-
-## 用法
+`--validate` compares rebuilt observations and ONNX actions against clean Isaac Lab captures. It requires `gt_step0.npz`, `gt_step1.npz`, `gt_step2.npz`, matching runtime constants, and the LAFAN motion library used for the capture. These files must come from your matching training/export environment.
 
 ```bash
-# 从 GR00T-WholeBodyControl/ 执行，使用当前 V21 step 12000:
-bash ../Any2Any/sim2sim/run_sim2sim.sh \
-  logs_rl/TRL_X2_Track/v21 v21_s12000 walk1_subject1 1500 \
-  logs_rl/TRL_X2_Track/v21/model_step_012000.pt
+# The validator looks for motion_lib_lafan_x2/robot beneath this directory.
+export X2_MOTION_DATA="/path/to/motion_data"
 
-# 手动验证门（纯 CPU；--capture_dir 不传时使用 ./capture）:
-python mujoco_sim2sim_x2.py --validate \
-  --onnx ../../GR00T-WholeBodyControl/logs_rl/TRL_X2_Track/v21/exported/model_step_012000_g1.onnx
-
-# 单条 clip 闭环 + 视频(手动指定版本 capture 与输出):
-MUJOCO_GL=egl python mujoco_sim2sim_x2.py --clip walk1_subject1 --steps 1500 \
-    --onnx ../../GR00T-WholeBodyControl/logs_rl/TRL_X2_Track/v21/exported/model_step_012000_g1.onnx \
-    --capture_dir capture --render out/walk1_subject1.mp4 --ref_ghost
+python sim2sim/mujoco_sim2sim_x2.py \
+  --validate \
+  --capture_dir /path/to/matching/capture \
+  --onnx /path/to/x2_policy.onnx
 ```
 
-## 结果快照
+The validator reports network parity, proprioception, future-motion observations, and end-to-end action differences. It also writes `rel_bias.npy` into the capture directory. The shipped JSON constants support playback but do not replace ground-truth observations for this check.
 
-- **V21 step 12000** — 当前部署版本；演示见 `v21_s12000/demos/`，planner / teleop 闭环结果见 `out/`。
-- **V21 step 10000** — 仅作同版本回归对比，不是默认部署入口。
+Historical error levels and observation-layout details are recorded in [Bugs and Fixes](../docs/BUGS_AND_FIXES.md). Interpret them with the checkpoint, sampling rate, and export version that produced them; they are not universal tolerances.
 
-验证门标准:proprio 精确 0.0000、maob ~1e-5、cmf ~0.05(30→50fps 插值底噪)、端到端动作 ~0.1(FSQ 容忍)。
+## Replay a motion with a reference ghost
 
-⚠️ ONNX 输入块序**每次导出可能变**(导出代码用 `list(set())`);验证门 A 段误差 >1 即错序,
-按 `mujoco_sim2sim_x2.py` docstring 的排列穷举重定 `ObsBuilder.build` 拼接顺序。
+With OpenCV installed, the output directory created, and the same environment and matching assets configured:
+
+```bash
+MUJOCO_GL=egl python sim2sim/mujoco_sim2sim_x2.py \
+  --onnx /path/to/x2_policy.onnx \
+  --capture_dir /path/to/matching/capture \
+  --motion_path /path/to/retargeted_clip.pkl \
+  --steps 1500 \
+  --render /path/to/output/motion.mp4 \
+  --ref_ghost
+```
+
+## Script map and portability
+
+| File | Purpose |
+|---|---|
+| [mujoco_sim2sim_x2.py](mujoco_sim2sim_x2.py) | Observation validation, closed-loop simulation, reference rendering |
+| [planner_teleop_x2.py](planner_teleop_x2.py) | Interactive or scripted planner-driven control |
+| [planner_lib.py](planner_lib.py) | Planner inference, resampling, and trajectory continuation |
+| [generate_locomotion_references.py](generate_locomotion_references.py) | Locomotion reference generation |
+| [planner_refsrc_x2.py](planner_refsrc_x2.py) | Reference source for the robot deployment path |
+| [onnx_block_order.py](onnx_block_order.py) | Observation-layout detection from exported ONNX |
+| [run_sim2sim.sh](run_sim2sim.sh) | Historical merge → export → capture → validate → render recipe |
+| [build_walking_bundle.sh](build_walking_bundle.sh) | Historical workspace-specific packaging script |
+
+`run_sim2sim.sh` contains an author-specific interpreter path, experiment names, and capture hooks that must exist in your trainer. Adapt it before use.
+
+`build_walking_bundle.sh` expects a root-level `kinematic_alignment.py`, a local `licenses/` directory, external robot assets, and two exact model checksums. Those assumptions do not match a fresh source checkout. Treat it as a packaging reference, not an out-of-the-box release command; only package external assets where their licenses permit it.
